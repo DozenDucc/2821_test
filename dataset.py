@@ -374,6 +374,55 @@ class Addition(data.Dataset):
         return int(1e6)
 
 
+class timesTwo(data.Dataset):
+    """Constructs a dataset with N circles, N is the number of components set by flags"""
+
+    def __init__(self, split, ood, gap=False):
+        """Initialize this dataset class.
+
+        Parameters:
+            opt (Option class) -- stores all the experiment flags; needs to be a subclass of BaseOptions
+        """
+        self.h = 1
+        self.w = 1
+        self.ood = ood
+        self.gap = gap
+        self.split = split
+        self.inp_dim = 1
+        self.out_dim = 1
+
+    def __getitem__(self, index):
+        """Return a data point and its metadata information.
+
+        Parameters:
+            index - - a random integer for data indexing
+
+        Returns a dictionary that contains A and A_paths
+            A(tensor) - - an image in one domain
+            A_paths(str) - - the path of the image
+        """
+
+        if self.ood:
+            scale = 2.5
+        else:
+            scale = 1.0
+
+        if self.gap:
+            # Construct allowed values from -1 to 1 with step size 'gap'
+            values = np.arange(-1, 1, self.gap)
+            R_one = np.random.choice(values)
+        else:
+            R_one = np.random.uniform(-scale, scale)
+        R_corrupt = np.array([R_one], dtype=np.float32)
+        R = np.array([-2 * R_one], dtype=np.float32)
+
+        return R_corrupt, R
+
+    def __len__(self):
+        """Return the total number of images in the dataset."""
+        # Dataset is always randomly generated
+        return int(1e6)
+
 class Square(data.Dataset):
     """Constructs a dataset with N circles, N is the number of components set by flags"""
 
@@ -772,7 +821,7 @@ class QR(data.Dataset):
         flat = np.concatenate([q.flatten(), r.flatten()])
 
         flat_list = np.tile(flat[None, :], (self.num_steps, 1))
-        flat_start = np.random.uniform(-1, 1, (*flat.shape))
+        flat_start = np.random.uniform(-1, 1, size=flat.shape)
         flat_list = np.concatenate([flat_start[None, :], flat_list], axis=0)
 
         return x.flatten(), flat  # , flat_list

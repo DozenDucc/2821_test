@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import os
 import pdb
 from dataset import LowRankDataset, ShortestPath, Negate, Inverse, Square, Identity, \
-    Det, LU, Sort, Eigen, QR, Equation, FiniteWrapper, Parity, Addition
+    Det, LU, Sort, Eigen, QR, Equation, FiniteWrapper, Parity, Addition, timesTwo
 import matplotlib.pyplot as plt
 import torch.multiprocessing as mp
 import torch.distributed as dist
@@ -23,6 +23,8 @@ import torch.backends.cudnn as cudnn
 import random
 from torchvision.utils import make_grid
 import seaborn as sns
+from plot_timesTwo_energy import plot_timesTwo_energy_from_model
+import csv
 
 
 def worker_init_fn(worker_id):
@@ -140,7 +142,7 @@ parser.add_argument('--lr', default=1e-4, type=float,
                     help='learning rate for training')
 parser.add_argument('--log_interval', default=10, type=int,
                     help='log outputs every so many batches')
-parser.add_argument('--save_interval', default=1000, type=int,
+parser.add_argument('--save_interval', default=100, type=int,
                     help='save outputs every so many batches')
 
 # data
@@ -338,9 +340,23 @@ def calc_geometric(l, dim=-1):
     return exclusive_cumprod(1 - l, dim=dim) * l
 
 
+def _append_csv_row(csv_path, header, row_dict):
+    os.makedirs(osp.dirname(csv_path), exist_ok=True)
+    file_exists = osp.exists(csv_path)
+    with open(csv_path, mode='a', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=header)
+        if not file_exists:
+            writer.writeheader()
+        # ensure all header keys exist
+        row = {}
+        for k in header:
+            row[k] = row_dict.get(k, float('nan'))
+        writer.writerow(row)
+
+
 def test(train_dataloader, model, FLAGS, step=0):
     global best_test_error_10, best_test_error_20, best_test_error_40, best_test_error_80, best_test_error
-    if FLAGS.cuda:
+    if FLAGS.cuda and torch.cuda.is_available():
         dev = torch.device("cuda")
     else:
         dev = torch.device("cpu")
@@ -430,6 +446,24 @@ def test(train_dataloader, model, FLAGS, step=0):
             best_test_error_80, best_test_error))
 
     model.train()
+    # Return a flat dict matching the console outputs for CSV logging
+    stats = {}
+    try:
+        stats['iter'] = step
+        # step errors (first 20)
+        max_d = min(20, dist.shape[0])
+        for i in range(max_d):
+            stats[f'dist_{i+1}'] = dist[i].item()
+        # best/min metrics
+        stats['min_dist'] = min_dist.item()
+        # energy values vector (length equals num steps used in test)
+        for i in range(energies.shape[0]):
+            stats[f'energy_{i+1}'] = energies[i].item()
+        # also store summary
+        stats['energy_mean'] = energies.mean().item()
+    except BaseException:
+        pass
+    return stats
 
 
 def train(train_dataloader, test_dataloader, logger, model,
@@ -437,13 +471,18 @@ def train(train_dataloader, test_dataloader, logger, model,
 
     it = FLAGS.resume_iter
     optimizer.zero_grad()
-    dev = torch.device("cuda")
+    if FLAGS.cuda and torch.cuda.is_available():
+        dev = torch.device("cuda")
+    else:
+        dev = torch.device("cpu")
 
     # initalize a replay buffer of solutions
     replay_buffer = ReplayBuffer(10000)
 
     for epoch in range(FLAGS.num_epoch):
         for inp, im in train_dataloader:
+            # print("inp is", inp)
+            # print("im is", im)
             im = im.float().to(dev)
             inp = inp.float().to(dev)
 
@@ -456,9 +495,9 @@ def train(train_dataloader, test_dataloader, logger, model,
                 inp_replay, opt_replay, gt_replay, scratch_replay = replay_batch
 
                 replay_mask = np.concatenate( [np.ones(im.size(0)), np.zeros(im.size(0))]).astype(np.bool)
-                inp = torch.cat([torch.Tensor(inp_replay).cuda(), inp], dim=0)
-                pred = torch.cat([torch.Tensor(opt_replay).cuda(), pred], dim=0)
-                im = torch.cat([torch.Tensor(gt_replay).cuda(), im], dim=0)
+                inp = torch.cat([torch.Tensor(inp_replay).to(dev), inp], dim=0)
+                pred = torch.cat([torch.Tensor(opt_replay).to(dev), pred], dim=0)
+                im = torch.cat([torch.Tensor(gt_replay).to(dev), im], dim=0)
             else:
                 replay_mask = (
                     np.random.uniform(
@@ -557,6 +596,32 @@ def train(train_dataloader, test_dataloader, logger, model,
                     logger.add_scalar(k, v, it)
 
                 print(string)
+                # Write training stats to CSV
+                train_csv = osp.join('result', FLAGS.exp, 'train_stats.csv')
+                train_header = [
+                    'iter',
+                    'im_loss',
+                    'no_replay_loss',
+                    'replay_loss',
+                    'ponder_loss',
+                    'energy_no_replay',
+                    'energy_replay',
+                    'energy_start_no_replay',
+                    'energy_start_replay',
+                    'mean_last_dist',
+                ]
+                row = {'iter': it}
+                for k in train_header:
+                    if k in kvs:
+                        val = kvs[k]
+                        # some entries may be tensors
+                        if hasattr(val, 'item'):
+                            try:
+                                val = val.item()
+                            except BaseException:
+                                pass
+                        row[k] = val
+                _append_csv_row(train_csv, train_header, row)
 
             if it % FLAGS.save_interval == 0 and rank_idx == 0:
                 model_path = osp.join(logdir, "model_latest.pth".format(it))
@@ -567,7 +632,40 @@ def train(train_dataloader, test_dataloader, logger, model,
 
                 torch.save(ckpt, model_path)
 
-                test(test_dataloader, model, FLAGS, step=it)
+                # Plot energy landscape for timesTwo at regular intervals with the updated model
+                if FLAGS.dataset == 'timesTwo':
+                    scale = 2.5 if FLAGS.ood else 1.0
+                    scale = 5
+                    # x in [-scale, scale], y in [-2*scale, 2*scale] for y=2x coverage
+                    res_dir = osp.join('result', FLAGS.exp)
+                    os.makedirs(res_dir, exist_ok=True)
+                    step_str = f"{it:07d}"
+                    out_step = osp.join(res_dir, f"energy_heatmap_{step_str}.png")
+                    title = f"timesTwo EBM Energy (step {it})"
+                    plot_timesTwo_energy_from_model(
+                        model=model,
+                        device=dev,
+                        out_path=out_step,
+                        x_min=-scale,
+                        x_max=scale,
+                        y_min=-2 * scale,
+                        y_max=2 * scale,
+                        resolution=400,
+                        title=title,
+                        plot_argmin=True,
+                        plot_grad=True
+                    )
+
+                # Run test and save statistics to CSV
+                test_stats = test(test_dataloader, model, FLAGS, step=it)
+                test_csv = osp.join('result', FLAGS.exp, 'test_stats.csv')
+                # Build a header that includes iter, dist_1..dist_20, energy_1..energy_80, min_dist, energy_mean
+                # We don't assume exact lengths; construct from present keys in a stable order.
+                dist_keys = [f'dist_{i}' for i in range(1, 21)]
+                energy_keys = [k for k in sorted(test_stats.keys()) if k.startswith('energy_')]
+                base_keys = ['iter', 'min_dist', 'energy_mean']
+                test_header = base_keys + dist_keys + energy_keys
+                _append_csv_row(test_csv, test_header, test_stats if isinstance(test_stats, dict) else {})
 
             it += 1
 
@@ -602,6 +700,9 @@ def main_single(rank, FLAGS):
     elif FLAGS.dataset == 'addition':
         dataset = Addition('train', FLAGS.rank, FLAGS.ood)
         test_dataset = Addition('test', FLAGS.rank, FLAGS.ood)
+    elif FLAGS.dataset == 'timesTwo':
+        dataset = timesTwo('train', FLAGS.ood, gap=0.0)
+        test_dataset = timesTwo('test', FLAGS.ood)
     elif FLAGS.dataset == 'inverse':
         dataset = Inverse('train', FLAGS.rank, FLAGS.ood)
         test_dataset = Inverse('test', FLAGS.rank, FLAGS.ood)
@@ -646,14 +747,17 @@ def main_single(rank, FLAGS):
 
     if world_size > 1:
         group = dist.init_process_group(
-            backend='nccl',
+            backend='nccl' if (FLAGS.cuda and torch.cuda.is_available()) else 'gloo',
             init_method='tcp://localhost:8113',
             world_size=world_size,
             rank=rank_idx,
             group_name="default")
 
-    torch.cuda.set_device(rank)
-    device = torch.device('cuda')
+    if FLAGS.cuda and torch.cuda.is_available():
+        torch.cuda.set_device(rank)
+        device = torch.device('cuda')
+    else:
+        device = torch.device('cpu')
 
     FLAGS_OLD = FLAGS
 
@@ -663,7 +767,7 @@ def main_single(rank, FLAGS):
             logdir, "model_latest.pth".format(
                 FLAGS.resume_iter))
 
-        checkpoint = torch.load(model_path, map_location=torch.device('cpu'))
+        checkpoint = torch.load(model_path, map_location=torch.device('cpu'), weights_only=False)
         FLAGS = checkpoint['FLAGS']
 
         FLAGS.resume_iter = FLAGS_OLD.resume_iter
@@ -675,7 +779,8 @@ def main_single(rank, FLAGS):
         FLAGS.num_steps = FLAGS_OLD.num_steps
         FLAGS.exp = FLAGS_OLD.exp
         FLAGS.ponder = FLAGS_OLD.ponder
-        FLAGS.heatmap = FLAGS_OLD.heatmap
+        if hasattr(FLAGS_OLD, 'heatmap'):
+            FLAGS.heatmap = FLAGS_OLD.heatmap
 
         model, optimizer = init_model(FLAGS, device, dataset)
         state_dict = model.state_dict()
