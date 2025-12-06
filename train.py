@@ -31,6 +31,93 @@ def worker_init_fn(worker_id):
     np.random.seed(int(torch.utils.data.get_worker_info().seed) % (2**32 - 1))
 
 
+def build_datasets(FLAGS):
+    """
+    Construct train and test datasets based on FLAGS.
+    This logic was originally in `main_single` and is now factored
+    out so that evaluation scripts can reuse it.
+    """
+    if FLAGS.dataset == 'lowrank':
+        dataset = LowRankDataset('train', FLAGS.rank, FLAGS.ood)
+        test_dataset = LowRankDataset('test', FLAGS.rank, FLAGS.ood)
+    elif FLAGS.dataset == 'shortestpath':
+        dataset = ShortestPath('train', FLAGS.rank, FLAGS.num_steps)
+        test_dataset = ShortestPath('test', FLAGS.rank, FLAGS.num_steps)
+    elif FLAGS.dataset == 'negate':
+        dataset = Negate('train', FLAGS.rank)
+        test_dataset = Negate('test', FLAGS.rank)
+    elif FLAGS.dataset == 'addition':
+        dataset = Addition('train', FLAGS.rank, FLAGS.ood)
+        test_dataset = Addition('test', FLAGS.rank, FLAGS.ood)
+    elif FLAGS.dataset == 'timesTwo':
+        dataset = timesTwo('train', FLAGS.ood, gap=0.0)
+        test_dataset = timesTwo('test', FLAGS.ood)
+    elif FLAGS.dataset == 'inverse':
+        dataset = Inverse('train', FLAGS.rank, FLAGS.ood)
+        test_dataset = Inverse('test', FLAGS.rank, FLAGS.ood)
+    elif FLAGS.dataset == 'square':
+        dataset = Square('train', FLAGS.rank, FLAGS.num_steps)
+        test_dataset = Square('test', FLAGS.rank, FLAGS.num_steps)
+    elif FLAGS.dataset == 'identity':
+        dataset = Identity('train', FLAGS.rank, FLAGS.num_steps)
+        test_dataset = Identity('test', FLAGS.rank, FLAGS.num_steps)
+    elif FLAGS.dataset == 'det':
+        dataset = Det('train', FLAGS.rank)
+        test_dataset = Det('test', FLAGS.rank)
+    elif FLAGS.dataset == 'lu':
+        dataset = LU('train', FLAGS.rank)
+        test_dataset = LU('test', FLAGS.rank)
+    elif FLAGS.dataset == 'sort':
+        dataset = Sort('train', FLAGS.rank, FLAGS.num_steps)
+        test_dataset = Sort('test', FLAGS.rank, FLAGS.num_steps)
+    elif FLAGS.dataset == 'eigen':
+        dataset = Eigen('train', FLAGS.rank, FLAGS.num_steps)
+        test_dataset = Eigen('test', FLAGS.rank, FLAGS.num_steps)
+    elif FLAGS.dataset == 'equation':
+        dataset = Equation('train', FLAGS.rank, FLAGS.num_steps)
+        test_dataset = Equation('test', FLAGS.rank, FLAGS.num_steps)
+    elif FLAGS.dataset == 'qr':
+        dataset = QR('train', FLAGS.rank, FLAGS.num_steps)
+        test_dataset = QR('test', FLAGS.rank, FLAGS.num_steps)
+    elif FLAGS.dataset == 'parity':
+        dataset = Parity('train', FLAGS.rank, FLAGS.num_steps)
+        test_dataset = Parity('test', FLAGS.rank, FLAGS.num_steps)
+    else:
+        raise ValueError(f"Unknown dataset type: {FLAGS.dataset}")
+
+    # Optionally wrap the training dataset to make it finite
+    if not getattr(FLAGS, 'infinite', False):
+        dataset = FiniteWrapper(
+            dataset,
+            FLAGS.dataset,
+            FLAGS.capacity,
+            FLAGS.rank,
+            FLAGS.num_steps)
+    return dataset, test_dataset
+
+
+def build_dataloaders(dataset, test_dataset, FLAGS, shuffle_train=True):
+    """
+    Construct train and test dataloaders given datasets and FLAGS.
+    """
+    train_dataloader = DataLoader(
+        dataset,
+        num_workers=FLAGS.data_workers,
+        batch_size=FLAGS.batch_size,
+        shuffle=shuffle_train,
+        pin_memory=False,
+        worker_init_fn=worker_init_fn)
+    test_dataloader = DataLoader(
+        test_dataset,
+        num_workers=FLAGS.data_workers,
+        batch_size=FLAGS.batch_size,
+        shuffle=True,
+        pin_memory=False,
+        drop_last=True,
+        worker_init_fn=worker_init_fn)
+    return train_dataloader, test_dataloader
+
+
 class ReplayBuffer(object):
     def __init__(self, size):
         """Create Replay buffer.
@@ -154,7 +241,7 @@ parser.add_argument('--rank', default=20, type=int,
                     help='rank of matrix to use')
 parser.add_argument('--num_steps', default=10, type=int,
                     help='Steps of gradient descent for training')
-parser.add_argument('--step_lr', default=100.0, type=float,
+parser.add_argument('--step_lr', default=1.0, type=float,
                     help='step size of latents')
 parser.add_argument('--ood', action='store_true',
                     help='test on the harder ood dataset')
@@ -624,7 +711,10 @@ def train(train_dataloader, test_dataloader, logger, model,
                 _append_csv_row(train_csv, train_header, row)
 
             if it % FLAGS.save_interval == 0 and rank_idx == 0:
-                model_path = osp.join(logdir, "model_latest.pth".format(it))
+                # Save checkpoint in the same folder as CSVs: result/<exp>/
+                ckpt_dir = osp.join('result', FLAGS.exp)
+                os.makedirs(ckpt_dir, exist_ok=True)
+                model_path = osp.join(ckpt_dir, "model_latest.pth")
                 ckpt = {'FLAGS': FLAGS}
 
                 ckpt['model_state_dict'] = model.state_dict()
@@ -635,7 +725,7 @@ def train(train_dataloader, test_dataloader, logger, model,
                 # Plot energy landscape for timesTwo at regular intervals with the updated model
                 if FLAGS.dataset == 'timesTwo':
                     scale = 2.5 if FLAGS.ood else 1.0
-                    scale = 5
+                    scale = 10
                     # x in [-scale, scale], y in [-2*scale, 2*scale] for y=2x coverage
                     res_dir = osp.join('result', FLAGS.exp)
                     os.makedirs(res_dir, exist_ok=True)
@@ -687,60 +777,8 @@ def main_single(rank, FLAGS):
         except BaseException:
             pass
 
-    # Load Dataset
-    if FLAGS.dataset == 'lowrank':
-        dataset = LowRankDataset('train', FLAGS.rank, FLAGS.ood)
-        test_dataset = LowRankDataset('test', FLAGS.rank, FLAGS.ood)
-    elif FLAGS.dataset == 'shortestpath':
-        dataset = ShortestPath('train', FLAGS.rank, FLAGS.num_steps)
-        test_dataset = ShortestPath('test', FLAGS.rank, FLAGS.num_steps)
-    elif FLAGS.dataset == 'negate':
-        dataset = Negate('train', FLAGS.rank)
-        test_dataset = Negate('test', FLAGS.rank)
-    elif FLAGS.dataset == 'addition':
-        dataset = Addition('train', FLAGS.rank, FLAGS.ood)
-        test_dataset = Addition('test', FLAGS.rank, FLAGS.ood)
-    elif FLAGS.dataset == 'timesTwo':
-        dataset = timesTwo('train', FLAGS.ood, gap=0.0)
-        test_dataset = timesTwo('test', FLAGS.ood)
-    elif FLAGS.dataset == 'inverse':
-        dataset = Inverse('train', FLAGS.rank, FLAGS.ood)
-        test_dataset = Inverse('test', FLAGS.rank, FLAGS.ood)
-    elif FLAGS.dataset == 'square':
-        dataset = Square('train', FLAGS.rank, FLAGS.num_steps)
-        test_dataset = Square('test', FLAGS.rank, FLAGS.num_steps)
-    elif FLAGS.dataset == 'identity':
-        dataset = Identity('train', FLAGS.rank, FLAGS.num_steps)
-        test_dataset = Identity('test', FLAGS.rank, FLAGS.num_steps)
-    elif FLAGS.dataset == 'det':
-        dataset = Det('train', FLAGS.rank)
-        test_dataset = Det('test', FLAGS.rank)
-    elif FLAGS.dataset == 'lu':
-        dataset = LU('train', FLAGS.rank)
-        test_dataset = LU('test', FLAGS.rank)
-    elif FLAGS.dataset == 'sort':
-        dataset = Sort('train', FLAGS.rank, FLAGS.num_steps)
-        test_dataset = Sort('test', FLAGS.rank, FLAGS.num_steps)
-    elif FLAGS.dataset == 'eigen':
-        dataset = Eigen('train', FLAGS.rank, FLAGS.num_steps)
-        test_dataset = Eigen('test', FLAGS.rank, FLAGS.num_steps)
-    elif FLAGS.dataset == 'equation':
-        dataset = Equation('train', FLAGS.rank, FLAGS.num_steps)
-        test_dataset = Equation('test', FLAGS.rank, FLAGS.num_steps)
-    elif FLAGS.dataset == 'qr':
-        dataset = QR('train', FLAGS.rank, FLAGS.num_steps)
-        test_dataset = QR('test', FLAGS.rank, FLAGS.num_steps)
-    elif FLAGS.dataset == 'parity':
-        dataset = Parity('train', FLAGS.rank, FLAGS.num_steps)
-        test_dataset = Parity('test', FLAGS.rank, FLAGS.num_steps)
-
-    if not FLAGS.infinite:
-        dataset = FiniteWrapper(
-            dataset,
-            FLAGS.dataset,
-            FLAGS.capacity,
-            FLAGS.rank,
-            FLAGS.num_steps)
+    # Load Dataset and wrap into DataLoaders
+    dataset, test_dataset = build_datasets(FLAGS)
 
     shuffle = True
     sampler = None
@@ -763,9 +801,11 @@ def main_single(rank, FLAGS):
 
     # Load model and key arguments
     if FLAGS.resume_iter != 0:
-        model_path = osp.join(
-            logdir, "model_latest.pth".format(
-                FLAGS.resume_iter))
+        # Prefer checkpoint from results directory; fall back to logdir
+        ckpt_dir = osp.join('result', FLAGS.exp)
+        preferred_model_path = osp.join(ckpt_dir, "model_latest.pth")
+        fallback_model_path = osp.join(logdir, "model_latest.pth")
+        model_path = preferred_model_path if osp.exists(preferred_model_path) else fallback_model_path
 
         checkpoint = torch.load(model_path, map_location=torch.device('cpu'), weights_only=False)
         FLAGS = checkpoint['FLAGS']
@@ -795,21 +835,8 @@ def main_single(rank, FLAGS):
 
     print("num_parameters: ", sum([p.numel() for p in model.parameters()]))
 
-    train_dataloader = DataLoader(
-        dataset,
-        num_workers=FLAGS.data_workers,
-        batch_size=FLAGS.batch_size,
-        shuffle=shuffle,
-        pin_memory=False,
-        worker_init_fn=worker_init_fn)
-    test_dataloader = DataLoader(
-        test_dataset,
-        num_workers=FLAGS.data_workers,
-        batch_size=FLAGS.batch_size,
-        shuffle=True,
-        pin_memory=False,
-        drop_last=True,
-        worker_init_fn=worker_init_fn)
+    train_dataloader, test_dataloader = build_dataloaders(
+        dataset, test_dataset, FLAGS, shuffle_train=shuffle)
 
     logger = SummaryWriter(logdir)
     it = FLAGS.resume_iter

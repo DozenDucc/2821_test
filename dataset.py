@@ -414,7 +414,7 @@ class timesTwo(data.Dataset):
         else:
             R_one = np.random.uniform(-scale, scale)
         R_corrupt = np.array([R_one], dtype=np.float32)
-        R = np.array([-2 * R_one], dtype=np.float32)
+        R = np.array([2 * R_one], dtype=np.float32)
 
         return R_corrupt, R
 

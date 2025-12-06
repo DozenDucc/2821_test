@@ -42,7 +42,17 @@ def compute_energy_grid(model, x_min, x_max, y_min, y_max, resolution, device):
     return XX, YY, energy
 
 
-def plot_and_save(XX, YY, energy, out_path, title, plot_argmin=False, plot_grad=False, plot_grad2=False):
+def plot_and_save(
+    XX,
+    YY,
+    energy,
+    out_path,
+    title,
+    plot_argmin=False,
+    plot_grad=False,
+    plot_grad2=False,
+    proposal_points=None,
+):
     extent = [XX.min(), XX.max(), YY.min(), YY.max()]
     xs_axis = XX[0, :]
     ys_axis = YY[:, 0]
@@ -76,11 +86,56 @@ def plot_and_save(XX, YY, energy, out_path, title, plot_argmin=False, plot_grad=
         # Optional overlays on energy pane
         x_vals = np.linspace(XX.min(), XX.max(), 200)
         y_vals = 2.0 * x_vals
-        ax_energy.plot(x_vals, y_vals, color='white', linestyle='--', linewidth=1.0, alpha=0.8, label='y = 2x')
+        ax_energy.plot(
+            x_vals,
+            y_vals,
+            color='white',
+            linestyle='--',
+            linewidth=1.0,
+            alpha=0.8,
+            label='y = 2x',
+        )
         if plot_argmin:
             argmin_indices = np.argmin(energy, axis=0)
             y_pred = ys_axis[argmin_indices]
-            ax_energy.plot(xs_axis, y_pred, color='red', linewidth=1.5, label='argmin_y E(x, y)')
+            # Plot argmin as a series of dots instead of a connected line
+            ax_energy.plot(
+                xs_axis,
+                y_pred,
+                color='red',
+                marker='o',
+                linestyle='None',
+                markersize=2.0,
+                label='argmin_y E(x, y)',
+            )
+
+        # Optional: overlay proposal locations, labelled by proposal index
+        if proposal_points is not None:
+            xs_p = proposal_points.get("xs", None)
+            ys_p = proposal_points.get("ys", None)
+            iters_p = proposal_points.get("iters", None)
+            if xs_p is not None and ys_p is not None and len(xs_p) > 0:
+                if iters_p is None:
+                    # If iteration indices are not provided, just number sequentially.
+                    iters_p = range(len(xs_p))
+                # Draw numeric labels directly at proposal locations (1-based index).
+                for x_p, y_p, step in zip(xs_p, ys_p, iters_p):
+                    ax_energy.text(
+                        x_p,
+                        y_p,
+                        f"{int(step) + 1}",
+                        color='white',
+                        fontsize=6,
+                        ha='center',
+                        va='center',
+                        bbox=dict(
+                            boxstyle='round,pad=0.1',
+                            facecolor='black',
+                            edgecolor='none',
+                            alpha=0.6,
+                        ),
+                    )
+
         ax_energy.legend(loc='upper right')
 
         # Optional: Gradient subplot dE/dy
@@ -109,25 +164,70 @@ def plot_and_save(XX, YY, energy, out_path, title, plot_argmin=False, plot_grad=
         plt.close()
         return
     else:
-        plt.figure(figsize=(6, 5), dpi=150)
-        im = plt.imshow(energy, origin='lower', extent=extent, aspect='auto', cmap='viridis')
-        plt.colorbar(im, label='Energy')
-        plt.xlabel('x')
-        plt.ylabel('y')
-        plt.title(title)
+        fig, ax = plt.subplots(figsize=(6, 5), dpi=150)
+        im = ax.imshow(energy, origin='lower', extent=extent, aspect='auto', cmap='viridis')
+        fig.colorbar(im, ax=ax, label='Energy')
+        ax.set_xlabel('x')
+        ax.set_ylabel('y')
+        ax.set_title(title)
 
-    # Optional: plot y = 2x guideline (timesTwo ground truth)
+        # Optional: plot y = 2x guideline (timesTwo ground truth)
         x_vals = np.linspace(XX.min(), XX.max(), 200)
         y_vals = 2.0 * x_vals
-        plt.plot(x_vals, y_vals, color='white', linestyle='--', linewidth=1.0, alpha=0.8, label='y = 2x')
+        ax.plot(
+            x_vals,
+            y_vals,
+            color='white',
+            linestyle='--',
+            linewidth=1.0,
+            alpha=0.8,
+            label='y = 2x',
+        )
 
-    # Optional: overlay argmin_y E(x, y) curve (model's prediction per x)
+        # Optional: overlay argmin_y E(x, y) curve (model's prediction per x)
         if plot_argmin:
             # energy shape: (num_ys, num_xs); argmin over y for each x (column-wise)
             argmin_indices = np.argmin(energy, axis=0)
             y_pred = ys_axis[argmin_indices]
-            plt.plot(xs_axis, y_pred, color='red', linewidth=1.5, label='argmin_y E(x, y)')
-        plt.legend(loc='upper right')
+            # Plot argmin as a series of dots instead of a connected line
+            ax.plot(
+                xs_axis,
+                y_pred,
+                color='red',
+                marker='o',
+                linestyle='None',
+                markersize=2.0,
+                label='argmin_y E(x, y)',
+            )
+
+        # Optional: overlay proposal locations, labelled by proposal index
+        if proposal_points is not None:
+            xs_p = proposal_points.get("xs", None)
+            ys_p = proposal_points.get("ys", None)
+            iters_p = proposal_points.get("iters", None)
+            if xs_p is not None and ys_p is not None and len(xs_p) > 0:
+                if iters_p is None:
+                    # If iteration indices are not provided, just number sequentially.
+                    iters_p = range(len(xs_p))
+                # Draw numeric labels directly at proposal locations (1-based index).
+                for x_p, y_p, step in zip(xs_p, ys_p, iters_p):
+                    ax.text(
+                        x_p,
+                        y_p,
+                        f"{int(step) + 1}",
+                        color='white',
+                        fontsize=6,
+                        ha='center',
+                        va='center',
+                        bbox=dict(
+                            boxstyle='round,pad=0.1',
+                            facecolor='black',
+                            edgecolor='none',
+                            alpha=0.6,
+                        ),
+                    )
+
+        ax.legend(loc='upper right')
 
     os.makedirs(osp.dirname(out_path), exist_ok=True)
     plt.tight_layout()
@@ -156,7 +256,16 @@ def plot_timesTwo_energy_from_model(model, device, out_path,
         device=device
     )
 
-    plot_and_save(XX, YY, energy, out_path, title, plot_argmin=plot_argmin, plot_grad=plot_grad, plot_grad2=plot_grad2)
+    plot_and_save(
+        XX,
+        YY,
+        energy,
+        out_path,
+        title,
+        plot_argmin=plot_argmin,
+        plot_grad=plot_grad,
+        plot_grad2=plot_grad2,
+    )
 
     if model_was_training:
         model.train()
@@ -186,7 +295,10 @@ def main():
     if args.ckpt:
         ckpt_path = args.ckpt
     else:
-        ckpt_path = osp.join(args.logdir, args.exp, 'model_latest.pth')
+        # Prefer checkpoint in results folder to match CSV location; fallback to logdir
+        ckpt_path = osp.join('result', args.exp, 'model_latest.pth')
+        if not osp.exists(ckpt_path):
+            ckpt_path = osp.join(args.logdir, args.exp, 'model_latest.pth')
 
     if not osp.exists(ckpt_path):
         raise FileNotFoundError(f'Checkpoint not found at: {ckpt_path}')
@@ -221,7 +333,16 @@ def main():
     if flags is not None and hasattr(flags, 'exp'):
         title += f' ({getattr(flags, "exp", "")})'
 
-    plot_and_save(XX, YY, energy, out_path, title, plot_argmin=args.plot_argmin, plot_grad=args.plot_grad, plot_grad2=args.plot_grad2)
+    plot_and_save(
+        XX,
+        YY,
+        energy,
+        out_path,
+        title,
+        plot_argmin=args.plot_argmin,
+        plot_grad=args.plot_grad,
+        plot_grad2=args.plot_grad2,
+    )
     print(f'Saved energy heatmap to: {out_path}')
 
 
